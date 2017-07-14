@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Resources:
+  myVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+  MyDB:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBName: "poller"
+      AllocatedStorage: "5"
+      DBInstanceClass: "db.t2.micro"
+      Engine: "postgres"
+      EngineVersion: "9.6.2"
+      MasterUsername: "pguser"
+      MasterUserPassword: "pgpassword"
+      MonitoringInterval: 1
+      MonitoringRoleArn: !GetAtt ["Role", "Arn"]
+      VPCSecurityGroups:
+        - !GetAtt [myVPC, DefaultSecurityGroup]
+      DBSubnetGroupName: !Ref myDBSubnetGroup
+
+  Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'rds.amazonaws.com'
+          Action: 'sts:AssumeRole'
+        - Effect: Allow
+          Principal:
+            Service: 'monitoring.rds.amazonaws.com'
+          Action: 'sts:AssumeRole'
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action: 'sts:AssumeRole'
+  Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../target/prod/cljs-rds-backpoller.zip
+      Handler: index.cljs_rds_backpoller_core_SLASH_work_magic
+      Runtime: nodejs4.3
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 128
+      Timeout: 120
+      Environment:
+        Variables:
+          PG_HOST: !GetAtt MyDB.Endpoint.Address
+          PG_PORT: !GetAtt MyDB.Endpoint.Port
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt [myVPC, DefaultSecurityGroup]
+        SubnetIds:
+          - !Ref mySubnet
+          - !Ref mySubnet2
+  mySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: myVPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: "us-east-1a"
+  mySubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: myVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: "us-east-1b"
+  myDBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: "test"
+      SubnetIds:
+        - !Ref mySubnet
+        - !Ref mySubnet2

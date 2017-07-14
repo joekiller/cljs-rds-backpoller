@@ -1,44 +1,50 @@
 (ns cljs-rds-backpoller.core
-  (:require [cljs-lambda.util :as lambda]
-            [cljs-lambda.context :as ctx]
+  (:require [cljs-lambda.context :as ctx]
             [cljs-lambda.macros :refer-macros [deflambda]]
             [cljs.reader :refer [read-string]]
             [cljs.nodejs :as nodejs]
-            [cljs.core.async :as async]
             [promesa.core :as p])
   (:require-macros [cljs.core.async.macros :refer [go]]))
 
-(def config
-  (-> (nodejs/require "fs")
-      (.readFileSync "static/config.edn" "UTF-8")
-      read-string))
+(def process (nodejs/require "process"))
+(def Pool (nodejs/require "pg-pool"))
+(def fs (nodejs/require "fs"))
 
-(defmulti cast-async-spell (fn [{spell :spell} ctx] (keyword spell)))
+(defn db-config []
+  (clj->js
+    {"user" (or (aget (.-env process) "PG_USER") "pguser")
+     "database" (or (aget (.-env process) "PG_DATABASE") "poller")
+     "password" (or (aget (.-env process) "PG_PASSWORD") "pgpassword")
+     "host" (or (aget (.-env process) "PG_HOST") "localhost")
+     "port" (read-string (or (aget (.-env process) "PG_PORT") "5432"))
+     ;; max number of clients in the pool
+     "max" 10
+     ;; how long a client is allowed to remain idle before being closed
+     "idleTimeoutMillis" 60000000}))
 
-(defmethod cast-async-spell :delay-channel
-  [{:keys [msecs] :or {msecs 1000}} ctx]
-  (go
-    (<! (async/timeout msecs))
-    {:waited msecs}))
+(def pool (Pool. (db-config)))
 
-(defmethod cast-async-spell :delay-promise
-  [{:keys [msecs] :or {msecs 1000}} ctx]
-  (p/promise
-   (fn [resolve]
-     (p/schedule msecs #(resolve {:waited msecs})))))
+(def first-query "SELECT * FROM pg_catalog.pg_tables;")
 
-(defmethod cast-async-spell :delay-fail
-  [{:keys [msecs] :or {msecs 1000}} ctx]
-  (go
-    (<! (async/timeout msecs))
-    ;; We can fail/succeed wherever w/ fail!/succeed! - we can also
-    ;; leave an Error instance on the channel we return, or return a reject
-    ;; promised - see :delayed-failure above.
-    (ctx/fail! ctx (js/Error. (str "Failing after " msecs " milliseconds")))))
+(defn query [query]
+  (prn "about to query: " query)
+  (prn (js->clj (db-config)))
+  (-> (.query pool query)
+      (p/then #(prn (js->clj %)))
+      (p/timeout 10000)
+      (p/catch #(do (prn "error as expected..." %)
+                    "caught error"))))
 
-(deflambda work-magic [{:keys [magic-word] :as input} ctx]
-  (when (not= magic-word (config :magic-word))
-    (throw (js/Error. "Your magic word is garbage")))
-  (if (= (input :spell) "echo-env")
-    (ctx/environment ctx)
-    (cast-async-spell input ctx)))
+(deflambda
+  work-magic
+  [event ctx]
+  (-> (query first-query)
+      (p/then (fn [results]
+                (prn results)
+                (prn "done.")
+                {:status "success"
+                 :message "yay"}))
+      (p/catch (fn [err]
+                 (prn err)
+                 {:status "error"
+                  :message "boo"}))))
